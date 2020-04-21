@@ -1,0 +1,415 @@
+---
+title: "Boston Precipitation Prediction"
+author: "Mariam Serag, Salma Mohammed, Crystal Lee"
+date: "3/3/2020"
+output: word_document
+---
+
+# Introduction
+
+Boston is a city with an unpredictable weather. It can be sunny than in minutes rain, so from our previous assignment dataset, we chose precipitation as our target variable and picked avergage (tempreture, averdew point, humidity, sea level pressure, visibility, and wind) as our independant variables that maybe maybe strong predictors to the precipitation level. 
+
+In part 1 of the assignemnt, we used descriptive statistics and plots to inspect a distribution of each variable and the relationship between the previously mentioned predictor values and our target variable, precipitation. Based on the correlation between variables, we selected several important variables to predict the value of precipitation. 
+
+In part 2, we included these variables to conduct regression analysis. By using the stepwise method and VIF, we further filtered less important predictors and avoid a multicollinear problem as well. Subsequently, to improve the performance of our model, we added polynomial terms and interaction terms to decrease RMSE. In the end, we removed some outliers through diagnostic plots and successfully refined our model.
+
+
+# Part 1. Descriptive Statistics
+
+```{r setup, include=FALSE}
+# import neccessary parckages and our dataset
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyverse)
+library(forecast)
+library(leaps)
+library(forecast)
+library(caret)
+library(ggplot2)
+library(skimr)
+library(car)
+```
+
+## 1.1 Examining the dataset and cleaning data
+
+#### Examing the dataset:
+
+```{r}
+bostonweather = read.csv('Boston weather_clean.csv')
+glimpse(bostonweather)
+```
+
+As we can see in this dataset, there are 24 variables and 3653 observations. All variables are integer and numeric variables without any missing values. However, we observe some problems:
+
+1. Each indicator have three variables, including average value, maximum value and minimum value. It cause our dataset to have lots of similar variables, such as `Avg.Temp`, `High Temp` and `Low Temp`. In order to avoid multicollinearity, we just choose the average one in each indicator. 
+
+2. Column names look too complex and are hard to call these variables in functions, so it is better to change them into simple names.
+
+3. `Year` and `Month` are numerical variables in our dataset but they should be categorical variables. Therefore, we should change their data types.
+
+4. `Day` column is just used for identifying observations. Specifically, it is like an ID for each obsercation. Thus, it is meaningless in this case and we should drop it.
+
+
+#### Inspecting the distribution of the target variable:
+
+```{r warning=FALSE, message=FALSE, fig.width=10, fig.height=5}
+
+p1 = ggplot(bostonweather, aes(x=Precip..in.)) + 
+     geom_histogram(fill = "darkblue") + 
+     labs(title = 'Without taking logarithm', 
+          x     = 'Daily Precipitation',
+          y     = 'Count')
+
+p2 = ggplot(bostonweather, aes(x=log(Precip..in.))) +  
+     geom_histogram(fill = "darkblue") + 
+     labs(title = 'Without taking logarithm', 
+          x     = 'Daily Precipitation',
+          y     = 'Count')
+
+cowplot::plot_grid(p1, p2, align = "v", nrow = 1)
+
+```
+
+Besides, when we look at the distribution of our target variable(See graphs above), `Precipitation`, it has a extremely right-skewed distribution. It might violate the assumption of regression model and lead to make poor predictions. Even if we take logarithm of our target variable, the distribution still looks not normal. The reason that cause this problem is because we currently consider daily precipitation and there is no rain in most of days in Boston. Therfore, there is a larger variation in daily precipitaion. 
+
+To solve this problem, we use monthly precipitation rather that daily precipitation. By computing monthly averages precipitation from daily precipitation, we can make the variation of precipitation smaller. The following is the result.
+
+```{r warning=FALSE, message=FALSE, fig.width=10, fig.height=5}
+# Group by data by year and month
+bostonweather_by_month =  bostonweather %>%
+                          group_by(Year, Month) %>%
+                          summarise_each(funs(mean))
+# Remove the day column
+bostonweather_by_month['Day'] = NULL
+
+p1 = ggplot(bostonweather_by_month, aes(x=Precip..in.)) + 
+     geom_histogram(fill = "darkblue") + 
+     labs(title = 'Without taking logarithm', 
+          x     = 'Monthly Precipitation',
+          y     = 'Count')
+
+p2 = ggplot(bostonweather_by_month, aes(x=log(Precip..in.))) +  
+     geom_histogram(fill = "darkblue") + 
+     labs(title = 'Without taking logarithm', 
+          x     = 'Monthly Precipitation',
+          y     = 'Count')
+
+cowplot::plot_grid(p1, p2, align = "v", nrow = 1)
+
+```
+
+
+When we use monthly precipitation and taking logarithm, the distribution of the target variable become normal. Thus, we will use monthly precipitation rather than daily precipitation and also use the value of logaritham as our target variable.
+
+
+#### Adjusting our dataset to solve problems we found before:
+
+```{r message=FALSE}
+# Select variables that we need
+bostonweather_by_month = 
+  bostonweather_by_month[,c(1,2,4,7,10,13,16,19,22)]
+
+# Change column names 
+names(bostonweather_by_month)[3:9] = c('Temp', 'Dew_Point', 'Humidity', 
+                                       'Sea_level', 'Visibility', 'Wind',
+                                       'Precipitation')
+
+# Transform `Year` and `Month` to categorical variable
+bostonweather_by_month['Year'] = factor(bostonweather_by_month[['Year']])
+bostonweather_by_month['Month'] = factor(bostonweather_by_month[['Month']])
+
+# taking logarithm of our target variable and drop the old variable
+bostonweather_by_month['log_Precipitation'] = log(bostonweather_by_month[['Precipitation']])
+bostonweather_by_month['Precipitation'] = NULL
+```
+
+#### Examining descriptive statistics and distributions of all variables
+
+```{r}
+skimr::skim(bostonweather_by_month[3:9])
+```
+
+```{r}
+psych::describe(bostonweather_by_month)
+```
+
+Predictors have different scale of values and some predictors also have skewed distribution. We need to normalize them before implementing regression models
+
+
+## 1.2. Examine relationships between the target variable and predictors
+
+
+#### Precipitation Box-whisker Plot By Month 
+
+```{r}
+
+ggplot(bostonweather_by_month, aes(x=factor(Month), y=log_Precipitation)) +
+  geom_boxplot(fill='white', color="black") +
+    labs(x="Month", y="log_Precipitation", title="Precipitation Rate per Month")
+bostonweather_by_month
+
+```
+
+In the boxplot, the median and variation of precipitation varys across months. We can assume that there might be a relationship between `Month` and `Precipitation`.
+
+
+#### Precipitation Box-whisker Plot By Year
+```{r}
+ggplot(bostonweather_by_month, aes(x=factor(Year), y=log_Precipitation)) +
+  geom_boxplot(fill = "darkmagenta", color = "black") +
+      labs(x="Year", y="log_Precipitation", title="Precipitation Rate per Year")
+
+```
+
+The median and variation of precipitation also varys over years. Therefor, we can assume that there might be a relationship between `Year` and `Precipitation`.
+
+
+#### Precipitation and Tempreture Scatter Plot
+```{r}
+scatterplot(log_Precipitation ~ Temp, data=bostonweather_by_month,
+            xlab="Average Tempreture", ylab="log Precipitation",
+            main="Precipitation and Temperture Scatter Plot")
+```
+
+The solid line shows the relationship between `Precipitation` and `Temperture`. It is a slighly rising line, but the slope is so low and thus we can suggest that the relationship between the two variables are weak and positive.
+
+
+#### Precipitation and Dew Point Scatter Plot
+```{r}
+scatterplot(log_Precipitation ~ Dew_Point, data=bostonweather_by_month,
+            xlab="Average Dew Point", ylab="log Precipitation",
+            main="Precipitation and Dew Point Scatter Plot")
+```
+
+There is also a slighly rising line. Thus, the relationship between `Precipitation` and `Dew Point` are positive but week.
+
+
+#### Precipitation and Humidity Scatter Plot
+```{r}
+scatterplot(log_Precipitation ~ Humidity, data=bostonweather_by_month,
+            xlab="Average Humidity", ylab="log Precipitation",
+            main="Precipitation and Humidity Scatter Plot")
+```
+
+`Precipitation` and `Humidity` seems to have stronger positive correlation because the slope of the trend line become larger and points cluster around the line more closely.
+
+
+#### Precipitation and Sea Level Pressure Scatter Plot
+```{r}
+scatterplot(log_Precipitation ~ Sea_level, data=bostonweather_by_month,
+            xlab="Average Sea Level", ylab="log Precipitation",
+            main="Precipitation and Sea Level Scatter Plot")
+```
+
+`Precipitation` and `Sea Level` seems to have a negative linear relation because there is a slight decreasing trend. Besides, most of points are relatively clost to the line.
+
+#### Precipitation and Average Visibility Scatter Plot
+```{r}
+scatterplot(log_Precipitation ~ Visibility, data=bostonweather_by_month,
+            xlab="Average Visibility", ylab="log Precipitation",
+            main="Precipitation and Average Visibility Scatter Plot")
+```
+
+`Precipitation` and `Visibility` have a negative linear relation as well. The trend line goes down and most of points are also clost to the line.
+
+
+
+#### Precipitation and Wind Scatter Plot
+```{r}
+scatterplot(log_Precipitation ~ Wind, data=bostonweather_by_month,
+            xlab="Average Wind", ylab="log Precipitation",
+            main="Precipitation and Wind Scatter Plot")
+```
+
+The trend line looks like a horizontal line, so we can suggest that there is no correlation between `Precipitation` and `Wind`.
+
+
+## 1.3 Examine relationships between predictors through corrplot
+
+```{r}
+# create a corrplot
+library(corrplot)
+library(RColorBrewer)
+corrplot(cor(bostonweather_by_month[,3:8]), method="color", type="upper", 
+         addCoef.col = "black", tl.col="black", tl.srt=30, 
+         sig.level = 0.01, insig = "blank", diag=FALSE,
+         number.cex=1,tl.cex=0.6, cl.ratio=0.2,cl.cex=0.7,
+         col = brewer.pal(n = 8, name = "RdYlBu"))
+```
+
+By making a corrplot, we can find some predictors have pretty higher correlation. In order to avoid multicollinearity, we should drop the `Dew_Point` column to remove a strong correlation between predictors.
+
+
+
+# Part 2. Predictive Modeling: Multiple Regression
+
+To Partition the data, we split it to 80% training, 10% validating and 10% testing. We chose our outcome variable to be the log of Percipitation because when we initially looked at Percipitation, our data was very skewed. However, using the log of Percipitation helped normalize the variable more.
+
+## 2.1 Preprocessing data
+
+```{r}
+# normalizing data
+normalize = function(x)((x-mean(x))/sd(x))
+names(bostonweather_by_month)
+bostonweather_n = bostonweather_by_month[,c(1:3,5:8,9)] %>%
+                  mutate_at(c('Temp', 'Humidity', 'Sea_level', 'Visibility'), normalize)
+skim(bostonweather_n[3:7])
+```
+
+
+```{r}
+# Partition data
+set.seed(1)
+inx_train    = caret::createDataPartition(bostonweather_n$log_Precipitation, p=0.8)$Resample1 
+dta_train    = bostonweather_n[ inx_train, ] 
+dta_left     = bostonweather_n[-inx_train, ]
+inx_test     = caret::createDataPartition(dta_left$log_Precipitation, p=0.5)$Resample1
+dta_test     = dta_left[ inx_test, ]
+dta_valid    = dta_left[ -inx_test, ]
+dim(dta_train)
+dim(dta_valid)
+dim(dta_valid)
+```
+
+
+## 2.3 Training and Tuning Models
+
+* first-round
+Adjusted R-squared:  0.296  
+RMSE:  0.464384
+
+```{r}
+# Run linear regression
+train_lm = lm(log_Precipitation ~ ., data = dta_train) 
+summary(train_lm)
+valid_pred = predict(train_lm, dta_valid)
+accuracy(valid_pred, dta_valid$log_Precipitation)
+```
+
+
+* Second-round attempt
+Adjusted R-squared:  0.2161
+RMSE:  0.5699281
+We use stepwise regression to choose features, but Adjusted R-squared decreases and RMSE increase. Both changes are to the worse.
+
+
+
+```{r}
+#train_lm_step = step(train_lm, direction = "backward")
+#summary(train_lm_step)  
+#valid_lm_step_pred = predict(train_lm_step, dta_valid)
+#accuracy(valid_lm_step_pred, dta_valid$log_Precipitation)
+```
+
+* We examine the GVIF for the variables and we find that only Temp has a higher GVIF than 5 which is: 6.528471
+
+```{r}
+vif(train_lm)
+```
+
+Third round attempt:
+We try removing the Temp vairable because of its higher VIF. Result: Although the adjusted R-squared decreases compared to model 1, which is the better model so far, (from Adjusted R-squared:  0.296  to 0.2526), RMSE increases or gets worse (from 0.464384 to 0.5699281 ). Therefore, we should not remove the Temp variable.
+
+
+
+```{r}
+# Run linear regression
+#train_lm = lm(log_Precipitation ~ .-Temp, data = dta_train)
+#summary(train_lm)
+#valid_pred = predict(train_lm, dta_valid)
+#accuracy(valid_pred, dta_valid$log_Precipitation)
+#vif(train_lm)
+#accuracy(valid_lm_step_pred, dta_valid$log_Precipitation)
+```
+
+
+Fourth round attempt:
+
+We try to add higher order terms and we end up with:
+Adjusted R-squared: 0.4313  > 0.296 (from model one which was the best up to this point)
+RMSE: 0.3886801 < 0.464384 (from model one which was the best up to this point)
+
+
+Fifth round attempt:
+
+Based on this, we now use Model 4 as our best model, and we attempt adding interaction variables. We tried adding multiple ones and concluded that the best interaction term to add (based on Adjusted R imporvements and RMSE decrease) was Month*Humidy as it gave us an RMSE of 0.3788055 and an adjusted R-Squared of  0.4475 (this is answer to Part 2, Q3)
+
+
+
+```{r}
+# Drop the Year column and add higher order terms
+bostonweather_n_2 = bostonweather_n %>%
+                    mutate(Temp_sqrd = Temp^2,
+                           Humidity_sqrd = Humidity^2,
+                           Sea_level_sqrd = Sea_level^2,
+                           Visibility_sqrd = Visibility^2,
+                           Wind_sqrd = Wind^2)
+                            
+dta_train = bostonweather_n_2[ inx_train, ]
+dta_left  = bostonweather_n_2[-inx_train, ]
+dta_test  = dta_left[ inx_test, ]
+dta_valid = dta_left[ -inx_test, ]
+
+
+
+train_lm = lm(log_Precipitation ~ .+Month*Humidity, data = dta_train)
+#train_lm_step = step(train_lm, direction = "forward")
+summary(train_lm)
+valid_lm_pred = predict(train_lm, dta_valid)
+accuracy(valid_lm_pred, dta_valid$log_Precipitation) 
+```
+
+
+# Use Diagnostic plots to remove outliers
+
+
+```{r warning=FALSE}
+# a) Histogram of Residuals.
+hist(train_lm$residuals)
+
+# b & c) Normal Probability Plot of Residual and Residuals vs. Fitted Values
+#par(mfrow=c(2,2))
+plot(train_lm)
+
+#check for Variance Inflation Factor (VIF); must be < 10; should be less than 5
+
+```
+
+We tried to remove outliers to improve our accuracy, however, everytime we removed a point, it only made our model less accurate, with a lower RMSE. Hence, we decided to keep all outliers. (this is answer to Part 2, Q4)
+
+```{r}
+#dta_train = dta_train[-c(72),]
+#train_lm_2 = lm(log_Precipitation ~ ., data = dta_train) 
+#summary(train_lm_2)
+#valid_pred_2 = predict(train_lm_2, dta_valid)
+#accuracy(valid_pred_2, dta_valid$log_Precipitation) # 0.458
+
+# a) Histogram of Residuals.
+#hist(train_lm_2$residuals)
+
+# b & c) Normal Probability Plot of Residual and Residuals vs. Fitted Values
+#par(mfrow=c(2,2))
+#plot(train_lm_2)
+
+```
+
+ 
+
+```{r}
+test_pred_2 = predict(train_lm, dta_test) #0.90
+accuracy(test_pred_2, dta_valid$log_Precipitation)
+```
+
+
+
+Q5) We can't really directly interpret higher order term coefficients as it is no longer a linear relationship. Instead, we can compare the outcomes given different values for our independent variables. 
+
+
+# Model Interpretation and Reflection
+Given that the RMSE of our test data is higher than that of our training data, it means that our model is overfitting, probably because we have trained it too well on the training data.
+This was an interesting process to see how trial and error could immensely help us improve our model. 
+
+A few insights we have: 
+Our model is hard to interpret since we have higher order values. Also, a lot of the variables have relationships between them sometimes not causal. Given we are focusing on prediction, we worried less about that, yet we were still carefull about it as that might impact the ability of agencies to predict things in the future (in terms of getting the data they need to utilize the model on. For example, if agencies have data on dew point they probably already have data on percipitation because they are very related).  
+
+We see one function for this model. It could be utilized by scientists or government agencies that care about percipitation. Engineers could possibly also care about how it impacts structures during and after building them. The model we created (or a good percipitation model) could help those entities to some extent plan around anticipated percipitation levels for future far away dates if they have the independent variables we relied on. 
